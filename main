@@ -1,0 +1,335 @@
+import numpy as np
+import copy
+'''
+每架无人机由一个状态位置0，表示正在搜索；1表示正在执行，攻击任务（此时路径已经规划好）；3 表示正在处理边界，
+冲突消解，多架无人机同时发现多个目标，给无人机和目标令牌，令牌多的无人机先选，选择令牌多的目标。关键问题，发现两个目标只能处理一个？
+
+
+程序流程
+对时间进行循环，每隔0.1s 采样一下
+	对于状态为0的无人机，此时应该是沿着速度方向前进0.1s，到新的位置后判断是否发现目标。是否即将出界
+1．	发现目标，首先判断自己能不能够打，不能打的话开始组建联盟。
+组建联盟：这里不存在信息发送，队长直接计算，其他无人机到达的时间，然后自行优化建立联盟，状态为0的无人机，和状态为3的无人机，被选中后，转为状态2，并获得规划路径
+2．	发现快要出界了，那么提前规划好一段边缘路径。
+对于状态为0,3的无人机，沿着之前规划好的路径走就行了，若规划的路径走完了，那么状态变为0,开始搜索。
+'''
+#          x,y,phi(度),v,r,s 资源 令牌数   分布表示 坐标（x,y），初始速度方向phi，速度大小v，最小转弯半径r，探测距离s
+UAVs_msg = [[10, 10, 160, 15, 100, 300, [1, 2, 3], 6],
+            [150, 150, 0, 15, 100, 300, [2, 0, 1], 5],
+            [900, 700, 225, 15, 100, 300, [1, 3, 1], 4],
+            [-800, 800, 270, 15, 100, 300, [1, 2, 1], 3],
+            [-900, -600, 60, 15, 100, 300, [1, 0, 0], 2],
+            [600, -900, 100, 15, 100, 300, [1, 2, 3], 1]
+            ]
+
+UAV_num = len(UAVs_msg)
+# x,y,resource,令牌
+Targets_msg = [[300, 0, [3, 2, 2], 3],
+               [-600, 500, [2, 1, 1], 2],
+               [0, 300, [0, 0, 1], 1]
+               ]
+target_num = len(Targets_msg)
+Targets_condition = np.ones(target_num)  # 目标状态 1表示未被摧毁，0表示被摧毁了
+
+run_time = 1000  # 总共仿真时间
+time_interval = 0.1  # 采样时间间隔
+
+
+class UAV:
+    def __init__(self, msg):
+        # 无人机属性
+        self.site = np.array(msg[0:2])  # 当前所在位置
+        self.phi = np.radians(msg[2])  # 当前航向角，采用弧度制
+        self.v = msg[3]  # 无人机速度
+        self.r_min = msg[4]  # 最小转弯半径
+        self.detect_scope = msg[5]  # 搜索半径
+        self.resource = msg[6]  # 携带资源
+        self.priority = msg[7]  # 令牌数，优先级别
+
+        # 无人机航迹
+        self.path = []  # 已经飞过的航迹，里面存储位置np.zeros(2),类型
+        self.planning_route = []  # 路径规划，用于状态
+        self.condition = 1  # 1 表示搜索，2表示执行攻击任务，3表示边界最小转移
+
+    def move(self):
+        if self.condition == 1:
+            self.path.append(self.site)
+            self.site = self.site * np.array([np.cos(self.phi), np.sin(self.phi)]) * time_interval
+        else:
+            self.path.append(self.planning_route.pop(0))
+            if len(self.planning_route) == 0:
+                # 都加完了，转为搜索
+                self.condition = 1
+
+    def search_target(self):
+        # 判断当前范围内有没有目标
+        detect_target = []  # 本次移动所发现目标
+        for i in range(target_num):
+            target_site = np.array(Targets_msg[i][0:2])
+            dis = np.sqrt(sum(np.square(target_site - self.site)))
+            if dis <= self.detect_scope:
+                detect_target.append(i)
+        return detect_target
+
+
+class GAPSO:
+    # 有很多固定的变量就写成一个类通过调用类的指定函数来搞定
+    # 用0,1向量表示解
+    def __init__(self):
+        self.popSize = 100
+        self.crossoverRate = 0.8
+        self.mutationRate = 0.2
+        self.population = []
+        # 存储种群，里面存储结构体结构体中包含基因
+        self.value = []
+        # 　种群对应的适应度
+
+    def cal_GAPSO(self, target, target_candidate, arrivals_time):
+        self.target = target
+        self.candidate = target_candidate
+        self.gene_len = len(target_candidate)
+        self.arrivals_time = np.array(arrivals_time)  # 每个地方选1的值
+
+    def cal_value(self, gene_list):
+        value = []
+        for gene in gene_list:
+            v1 = sum(np.array(gene) * self.arrivals_time)
+            v2 = sum(gene)
+            value.append([v1, v2])
+        return value
+    def Filter(self):
+        # 选择出父母，简单的竞标形式 选出2个两队
+        candidate = np.random.randint(0, self.popSize, 2)
+        father=[]
+        mather=[]
+        if self.compare(self.rank_crowd[candidate[0]],self.rank_crowd[candidate[1]])==1:
+            father=self.population[candidate[0]]
+        else:
+            father = copy.copy(self.population[candidate[1]])
+
+        if self.compare(self.rank_crowd[candidate[2]],self.rank_crowd[candidate[3]])==1:
+            mather=self.population[candidate[2]]
+        else:
+            mather = copy.copy(self.population[candidate[3]])
+
+        return father, mather
+
+    def Breed(self):
+
+
+        new_population = []
+        for i in range(0, self.popSize, 2):  # interval is two
+            father, mather = self.Filter()
+            babby1, babby2 = self.Crossover(father, mather)  # 交叉变异 有关概率的事情都放在对应函数里面处理
+            babby1 = self.Mutation(babby1)
+            babby2 = self.Mutation(babby2)
+            if i < self.popSize:
+                new_population.append(babby1)
+            if i + 1 < self.popSize:
+                new_population.append(babby2)
+        self.population = copy.deepcopy(new_population)
+        self.rank_crowd = self.cla_fit(self.population)
+
+    def compare(self,rank_crowd1,rank_crowd2):
+        #　给出[rank,crowd] 形式，返回比较结果
+        re=0
+        if rank_crowd1[0]<rank_crowd2[0]:
+            re=1
+        elif rank_crowd1[0]==rank_crowd2[0]:
+            if rank_crowd1[1]>rank_crowd2[1]:
+                re=1
+        return re
+
+
+    def cla_fit(self, list):
+        # 计算种群适应度,给出list，返回对应的适应度
+
+        value = self.cal_value(list)  # 目标函数的值
+
+        gene_list = list.copy()
+        rank = []  # rank中存放非支配序，rank[0]=[1,3,6] 表示非支配解，存下标吧
+
+        crowd = []  # 拥挤度
+        while gene_list == []:
+            ranki = []  # 存放同级的
+            gene_list_len = len(gene_list)
+
+            for i in range(len(list)):
+                ######判断知否已知支配次序
+                exist = False
+                for ex in rank:
+                    if ex.count(i) != 0:
+                        exist = True
+                        break
+                if exist:
+                    continue
+                ####
+                ### 判断在gene_list是否是非支配解
+                flag = True
+                for j in range(gene_list_len):
+                    if self.control(gene_list[j], list[i]) == 1:
+                        # j支配i
+                        flag = False
+                        break
+                if flag:
+                    # 是非支配解
+                    ranki.append(i)
+            # 删除gene_list中的非支配解
+            for del_index in ranki:
+                gene_list.remove(list[del_index])  # remove 只是每次删掉第一个
+
+            rank.append(ranki)
+
+            # 计算ranki中的拥挤度
+            ranki_value = [value[i] for i in ranki]
+
+            arg_sort = np.argsort(ranki_value, axis=0)
+            crowdi = np.zeros(len(ranki))
+            for i in range(len(ranki)):
+                for j in range(len(ranki)):
+                    if arg_sort[j, 0] == i:
+                        if j == 0 or j == len(ranki) - 1:  # 在边界
+                            crowdi = np.inf
+                        else:
+                            crowdi[i] += arg_sort[j + 1, 0] - arg_sort[j - 1, 0]
+                    if arg_sort[j, 1] == i:
+                        if j == 0 or j == len(ranki) - 1:  # 在边界
+                            crowdi = np.inf
+                        else:
+                            crowdi[i] += arg_sort[j + 1, 1] - arg_sort[j - 1, 1]
+            crowd.append(crowdi)
+        re=np.zeros((len(list),2))
+        for i in range(len(rank)):
+            for j in range(len(rank[i])):
+                re[rank[i][j]][0]=i
+                re[rank[i][j]][1]=crowd[i][j]
+        # re = [[[rank[i][j], i, crowd[i][j]] for j in range(len(rank[i]))] for i in range(len(rank))]
+        return re
+
+    def control(self, gene1, gene2):
+        # gene1 支配 gene2 返回1
+        # 互不支配 返回 0
+        # 2 支配1 返回-1
+        value1 = np.zeros(2)  # 两个目标
+        value2 = np.zeros(2)
+        value1[0] = sum(np.array(gene1) * self.arrivals_time)
+        value1[1] = sum(gene1)
+
+        value1[0] = sum(np.array(gene2) * self.arrivals_time)
+        value2[1] = sum(gene2)
+        # 两个都是越小越好
+        if np.alltrue(value1 < value2):
+            return 1
+        elif np.alltrue(value1 > value2):
+            return -1
+        else:
+            return 0
+
+    def InitPop(self):
+        # 初始化种群
+        for i in range(self.popSize):
+            gene = np.random.randint(0, 2, self.gene_len)
+            self.population.append(gene)
+        self.rank_crowd = self.cla_fit(self.population)
+    def Crossover(self, father, mather):
+        # 选出两个点进行交叉
+        index = np.floor(self.gene_len / 2)
+        babby1 = father.copy()
+        babby2 = mather.copy()
+        babby1[index:] = mather[index:]
+        babby2[0:index] = mather[0:index]
+
+    def Mutation(self, people):
+        # 变异函数
+        if np.random.rand() < self.mutationRate:  # 0 to 1 random number
+            index = np.random.randint(0, self.gene_len)
+            people[index] = 1 - people[index]  # 1 变0  0 变成1
+        return people
+
+
+
+def clash_avoid(group_find_targets):
+    # 分配好哪架无人机处理哪个目标，
+    # 返回[[1,3],[2,2]] 类型，表示第一架无人机围绕第三个目标组建联盟，第二架无人机围绕第2个目标组建联盟
+    # 依次组建联盟
+    UAV_task = []  # 返回数据
+    # 根据无人机令牌数，排序
+    group_find_targets = sorted(group_find_targets, key=lambda x: UAV_groups[x[0]].priority)
+
+    for find_msg in group_find_targets:
+        UAVi = find_msg[0]  # UAV index
+        find_target = find_msg[1]  # 发现目标集合
+
+        # 删除已经被挑走的目标
+        for cp in UAV_task:
+            if find_target.count(cp[1]) != 0:
+                find_target.remove(cp[1])
+
+        if find_target != []:
+            # 按照目标令牌数排序
+            find_target = sorted(find_target, key=lambda tar_index: Targets_msg[tar_index][3])
+            # 选择第一个目标，建立联盟
+            UAV_task.append([UAVi, find_target[0]])
+    return UAV_task
+
+
+def Arrivals_time(target, target_candidate):
+
+
+# 计算候选集合到目标的最短时间
+
+def Form_coalition(target, target_candidate):
+    # 联盟组建，给出目标和候选无人机，返回联盟完成集合时间，
+    # 1. 求解各个无人机的最短到达时间
+    # 2. 采用并行多目标GAPSO算法进行求解
+
+    arrivals_time = Arrivals_time(target, target_candidate)
+    # 各个无人机到达时间
+    GAPSO
+
+
+# 初始化无人机群
+UAV_groups = []
+for msg_i in UAVs_msg:
+    UAV_groups.append(UAV(msg_i))
+
+if __name__ == '__main__':
+
+    for t in np.arange(0, 1000, time_interval):
+
+        group_find_targets = []  # 存放当下无人机发现目标集  ([i,[1 3 6]],[...])
+
+        # 执行搜索
+        for UAVi, i in zip(UAV_groups, range(UAV_num)):  # 这里其实可以写成多线程技术，反正各架无人机此时一样
+
+            if UAVi.condition == 1:
+                # 执行搜索任务
+                find_targets = UAVi.search_target()
+
+                if find_targets != []:  # 若发现目标则添加进去
+                    group_find_targets.append([i, find_targets])
+
+                    # # 先判断当前的情况再move
+                    # UAVi.move()
+
+        # 进行冲突处理和组建联盟
+        UAV_task = clash_avoid(group_find_targets)  # 返回哪家无人机处理哪个目标
+
+        # 构造一个不含队长的候选集
+        candidate = []
+        for i in range(UAV_num):
+            if UAV_groups[i].condition == 1 or UAV_groups[i].condition == 3:
+                candidate.append(i)
+        for cp in UAV_task:
+            if candidate.count(cp[0]) != 0:
+                candidate.remove(cp[0])  # remove 队长
+
+        # 采用优化算法来建立联合打击联盟
+        for cp in UAV_task:
+            captain = cp[0]  # captain 不一定被选中
+            target = cp[1]  #
+            target_candidate = candidate.copy()  # 此目标的候选集合
+            target_candidate.append(captain)
+            coalition, arrive_time = Form_coalition(target, target_candidate)
+
+            # 获得coalition，后需进行航迹规划，并且把里面的无人机状态改为2，最后在candidate中remove掉这些元素
