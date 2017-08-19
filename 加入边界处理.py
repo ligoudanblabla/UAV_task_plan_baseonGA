@@ -29,20 +29,20 @@ import time
 #             [600, -900, 100, 15, 130, 300, [1, 2, 3], 1],
 #             [-200, 900, 270, 15, 130, 300, [1, 2, 3], 1]
 #             ]
-UAVs_msg = [[10, 10, 160, 15, 100, 300, [1, 2, 3], 6],
-            [150, 150, 0, 15, 100, 300, [2, 0, 1], 5],
-            [900, 700, 225, 15, 100, 300, [1, 3, 1], 4],
-            [-800, 800, 270, 15, 100, 300, [1, 2, 1], 3],
-            [-900, -600, 60, 15, 100, 300, [1, 0, 0], 2],
-            [600, -900, 100, 15, 100, 300, [1, 2, 3], 1],
-            [-300, 900, 270, 15, 130, 300, [2, 1, 1], 1]
+UAVs_msg = [[-100, -190, 20, 23, 90, 300, [2, 2, 3], 6],
+            [150, -50, 0, 25, 100, 400, [2, 0, 1], 5],
+            [900, 700, 70, 25, 100, 300, [1, 3, 2], 4],
+            [-800, 800, 270, 30, 150, 250, [1, 2, 1], 3],
+            [-900, -600, 320, 30, 150, 300, [1, 2, 0], 2],
+            [30, 850, -30, 25, 130, 250, [1, 1, 3], 1]
+            # [-300, 900, 270, 15, 130, 300, [2, 1, 1], 1]
             ]
 border = [[-1000, 1000], [-1000, 1000]]
 UAV_num = len(UAVs_msg)
 # x,y,resource,令牌
-Targets_msg = [[300, 0, [3, 2, 2], 3],
-               [-600, 500, [2, 1, 1], 2],
-               [0, 300, [0, 0, 1], 1]
+Targets_msg = [[-350, -200, [3, 5, 4], 3],
+               [-600, 500, [3, 1, 2], 2],
+               [0, 100, [0, 0, 1], 1]
                ]
 target_num = len(Targets_msg)
 Targets_condition = np.ones(target_num)  # 目标状态 1表示未被摧毁，0表示被摧毁了
@@ -191,7 +191,7 @@ class self:
             point = [center[0] + R * np.cos(theta), center[1] + R * np.sin(theta)]
             self.planning_route.append(point)
 
-        self.condition=2   # 1,2,3  搜索，攻击，转弯。 把转弯放到攻击状态里面去了
+        self.condition=2   # 1,2,3  搜索，攻击，转弯。 把转弯放到攻击状态里面去了,转弯的时候不接受任务，其实可以改成完成当前任务之后接受任务
         self.phi = self.phi + direction * hudu  # 改变、‘速度方向 旋转了这么多弧度，
 
 
@@ -213,6 +213,10 @@ class GAPSO:
     def InitPop(self):
         # 初始化种群
         self.population = []
+        self.fvalue = []
+        self.corwed = []
+        self.rank = []
+
         for i in range(self.popSize):
             gene = np.random.randint(0, 2, self.gene_len)
             fvalue = self.CalFit(gene)
@@ -674,7 +678,7 @@ if __name__ == '__main__':
     # coa,time=ggogo.cal_GAPSO(1,[1,2,3,5],[50,80,100,170])
     # print('')
 
-    for t in np.arange(0, 138, time_interval):
+    for t in np.arange(0, 80, time_interval):
 
         group_find_targets = []  # 存放当下无人机发现目标集  ([i,[1 3 6]],[...])
 

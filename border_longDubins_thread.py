@@ -1,9 +1,4 @@
-# @Time    : 2017/7/26 10:03
-# @Author  : BaWang
-# @Site    :
-# @Summart :修改了路径规划中长短Dubins路径处理，到达时间优先用短Dubins路径，
-# 给定时间规划路径时，首先判断短Dubins路径，在最大半径下是否可达，若可达就用短Dubins路径做二分法，否则用长Dubins路径二分
-# 这里有一个重大的问题,短Dubins路径和长Dubins路径之间 不是连续的,因此有写时候会存在特殊的时间,使两者同时不可达到
+# 有边界处理用的长Dubins路径,多线程
 import copy
 from math import modf
 from operator import itemgetter
@@ -12,7 +7,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 from sympy import Point, Circle, Line
 import time
-
+from threading import Thread
+import multiprocessing
 
 '''
 每架无人机由一个状态位置0，表示正在搜索；1表示正在执行，攻击任务（此时路径已经规划好）；3 表示正在处理边界，
@@ -28,28 +24,23 @@ import time
 对于状态为0,3的无人机，沿着之前规划好的路径走就行了，若规划的路径走完了，那么状态变为0,开始搜索。
 '''
 #          x,y,phi(degree),v,r,s 资源 令牌数   分布表示 坐标（x,y），初始速度方向phi，速度大小v，最小转弯半径r，探测距离s
-# UAVs_msg = [[10, 10, 160, 20, 150, 320, [1, 2, 3], 6],
-#             [150, 150, 0, 25, 120, 330, [2, 0, 1], 5],
-#             [900, 700, 225, 18, 100, 300, [1, 3, 1], 4],
-#             [-800, 800, 270, 19, 100, 300, [1, 2, 1], 3],
-#             [-900, -600, 60, 15, 100, 300, [1, 0, 0], 2],
-#             [600, -900, 100, 15, 130, 300, [1, 2, 3], 1],
-#             [-200, 900, 270, 15, 130, 300, [1, 2, 3], 1]
-#             ]
-UAVs_msg = [[10, 10, 160, 15, 100, 300, [1, 2, 3], 6],
-            [150, 150, 0, 15, 100, 300, [2, 0, 1], 5],
-            [900, 700, 225, 15, 100, 300, [1, 3, 1], 4],
-            [-800, 800, 270, 15, 100, 300, [1, 2, 1], 3],
-            [-900, -600, 60, 15, 100, 300, [1, 0, 0], 2],
-            [600, -900, 100, 15, 100, 300, [1, 2, 3], 1],
-            [-300, 900, 270, 15, 130, 300, [2, 1, 1], 1]
+
+UAVs_msg = [[-100, -190, 20, 23, 90, 3000, [2, 2, 3], 6]
+            # [150, -50, 0, 25, 100, 400, [2, 0, 1], 5],
+            # [900, 700, 70, 25, 100, 300, [1, 3, 2], 4],
+            # [-800, 800, 270, 30, 150, 250, [1, 2, 1], 3],
+            # [-900, -600, 320, 30, 150, 300, [1, 2, 0], 2],
+            # [30, 850, -30, 25, 130, 250, [1, 1, 3], 1]
+            # [-300, 900, 270, 15, 130, 300, [2, 1, 1], 1]
             ]
-border = [[-1000, 1000], [-1000, 1000]]
+
+Insted_INF=99999
+border = np.array([[-1000, 1000], [-1000, 1000]])
 UAV_num = len(UAVs_msg)
 # x,y,resource,令牌
-Targets_msg = [[300, 0, [3, 2, 2], 3],
-               [-600, 500, [2, 1, 1], 2],
-               [0, 300, [0, 0, 1], 1]
+Targets_msg = [[-350, -200, [3, 5, 4], 3]
+               # [-600, 500, [3, 1, 2], 2],
+               # [0, 100, [0, 0, 1], 1]
                ]
 target_num = len(Targets_msg)
 Targets_condition = np.ones(target_num)  # 目标状态 1表示未被摧毁，0表示被摧毁了
@@ -58,6 +49,13 @@ run_time = 1000  # 总共仿真时间
 time_interval = 0.1  # 采样时间间隔
 deviation = 0.01  # 误差
 
+##### canshu
+
+GA_thread_num = 3
+# 线程个数
+GA_iter_num = 40  # 遗传算法迭代次数
+GA_exchang = 20  # 数据迁移代数
+popSize=20
 
 def sign1(x):
     if x >= 0:
@@ -98,6 +96,7 @@ class self:
         self.condition = 1  # 1 表示搜索，2表示执行攻击任务，3表示边界最小转移
 
     def move(self):
+        # 把当前位置放进去path中然后在走下一步
         self.path.append(self.site)
         if self.condition == 1:
 
@@ -136,7 +135,7 @@ class self:
             # 大于y的上界
             type = 0
             l1 = border[0][1] - site[0]
-        elif site[0] >= border[0][1] and (0 < phi < np.pi / 2 or 3 * np.pi / 2 < phi <= np.pi * 2):
+        elif site[0] >= border[0][1] and (0 < phi <= np.pi / 2 or 3 * np.pi / 2 < phi <= np.pi * 2):
             # 大于x的上界
             type = 1
             l1 = site[1] - border[1][0]
@@ -197,15 +196,16 @@ class self:
             point = [center[0] + R * np.cos(theta), center[1] + R * np.sin(theta)]
             self.planning_route.append(point)
 
-        self.condition = 2  # 1,2,3  搜索，攻击，转弯。 把转弯放到攻击状态里面去了
+        self.condition = 2  # 1,2,3  搜索，攻击，转弯。 把转弯放到攻击状态里面去了,转弯的时候不接受任务，其实可以改成完成当前任务之后接受任务
         self.phi = self.phi + direction * hudu  # 改变、‘速度方向 旋转了这么多弧度，
 
 
 class GAPSO:
+    # 修改 加入线程处理
     # 有很多固定的变量就写成一个类通过调用类的指定函数来搞定
     # 用0,1向量表示解
     def __init__(self):
-        self.popSize = 20
+        self.popSize = popSize
         self.crossoverRate = 0.8
         self.mutationRate = 0.2
         self.population = []
@@ -215,13 +215,15 @@ class GAPSO:
         self.fvalue = []  # 存储不同目标函数的值[[1,1,2],[1,1,2],...]
         self.rank = []  # 非支配排序 0 表示最高层
         self.corwed = []  # 拥挤度算子
+        # 这里偷懒了，其实最好是吧population，fvalue，rank，corwed，写到一个类people类里面
 
     def InitPop(self):
         # 初始化种群
         self.population = []
-        self.fvalue=[]
-        self.rank=[]
-        self.corwed=[]
+        self.fvalue = []
+        self.corwed = []
+        self.rank = []
+
         for i in range(self.popSize):
             gene = np.random.randint(0, 2, self.gene_len)
             fvalue = self.CalFit(gene)
@@ -269,8 +271,8 @@ class GAPSO:
         for m in range(len(self.fvalue[0])):
             sbi_fvalue = sorted(value_index, key=lambda x: x[0][m])
             # 按照第i个value从小到大排序，sorted不改变value_index的值
-            self.corwed[sbi_fvalue[0][1]] = np.inf
-            self.corwed[sbi_fvalue[-1][1]] = np.inf
+            self.corwed[sbi_fvalue[0][1]] = Insted_INF
+            self.corwed[sbi_fvalue[-1][1]] = Insted_INF
             for i in range(1, self.popSize - 1):
                 self.corwed[sbi_fvalue[i][1]] += sbi_fvalue[i + 1][0][m] - sbi_fvalue[i + 1][0][m]
 
@@ -299,10 +301,46 @@ class GAPSO:
             # return 0.1 * v1 + 2 * v2 + 0.1 * v3 / v2
             return [v1, v2, v3]
         else:
-            return [np.inf, np.inf, np.inf]
+            return [Insted_INF, Insted_INF, Insted_INF]
+
+    # def process(self):
+    #     # args是关键字参数，需要加上名字，写成args=(self,)
+    #     th1 = Thread(target=GAPSO.run, args=(self,ll))
+    #     th1.start()
+    #     th1.join()
+
+    def run(self, ll, iter_num=10):
+        # print('第 %d 个开始时间%s' % (ll, time.ctime()))
+        # time.sleep(2)
+        for i in range(iter_num):
+            self.Breed()
+        # print('第 %d 个结束时间%s' % (ll, time.ctime()))
+
+    def set_parameter(self, target, target_candidate, arrivals_time):
+        # 设置参数,初始化种群
+        self.target = target
+        self.candidate = target_candidate
+        self.gene_len = len(target_candidate)
+        self.arrivals_time = np.array(arrivals_time)  # 每个地方选1的值
+
+        self.InitPop()
+
+    def getPareto_list(self):
+        # 取出非支配解
+        pareto_list = []  # 非支配解集合,这里用的是强支配,对强支配再进行一下若支配处理,用最后的弱支配做解集合
+        for i in range(self.popSize):
+            if self.rank[i] == 1:
+                flag = 1
+                for j in range(len(pareto_list)):
+                    if np.alltrue(self.population[i] == pareto_list[j]):
+                        flag = 0
+                        break
+                if flag == 1:
+                    pareto_list.append(self.population[i])
+        return pareto_list
 
     def cal_GAPSO(self, target, target_candidate, arrivals_time):
-
+        # 改成多线程之后这个函数功能要分拆成3个,1. 赋值 ,2. 迭代  3. 取值
         self.target = target
         self.candidate = target_candidate
         self.gene_len = len(target_candidate)
@@ -325,6 +363,30 @@ class GAPSO:
                 if flag == 1:
                     pareto_list.append(self.population[i])
         return self.choose_one(pareto_list)
+
+    def best_pareto_gene(self):
+        Pareto_list = self.getPareto_list()
+        return self.pareto_best(Pareto_list)
+
+    def pareto_best(self, pareto_list):
+        priority_value = 1
+        value_list = []
+        for gene in pareto_list:
+            value_list.append([gene, self.CalFit(gene)])
+        value_list.sort(key=lambda x: x[1][priority_value])
+        best_gene = value_list[0][0]
+        return best_gene
+
+    def gene_coal_maxtime(self, best_gene):
+        # 给定基因返回基因对应的,联盟和联盟到达时间
+        coalition = []
+        max_time = 0
+        for i in range(self.gene_len):
+            if best_gene[i] == 1:
+                coalition.append(target_candidate[i])
+                if max_time < arrivals_time[i]:
+                    max_time = arrivals_time[i]
+        return coalition, max_time
 
     def choose_one(self, pareto_list):
         # 从 pareto解集中取出一个解
@@ -356,7 +418,11 @@ class GAPSO:
             return copy.deepcopy(self.population[candidateindex[0]])
         elif self.rank[candidateindex[0]] == self.rank[candidateindex[1]] and self.corwed[candidateindex[0]] >= \
                 self.corwed[candidateindex[1]]:
-            return copy.deepcopy(self.population[candidateindex[0]])
+            rand_num = np.random.rand()
+            if rand_num > 0.3:
+                return copy.deepcopy(self.population[candidateindex[0]])
+            else:
+                return copy.deepcopy(self.population[candidateindex[1]])
         else:
             return copy.deepcopy(self.population[candidateindex[1]])
 
@@ -433,11 +499,10 @@ def Arrivals_time(target_index, target_candidate):
     return arrivals_time
 
 
-def Arrival_time(UAV, target, R0, type=1):
-    direction, hudu, tangent_site, center = Dubins_msg(UAV, target, R0, type=type)
+def Arrival_time(UAV, target, R0):
+    direction, hudu, tangent_site, center = Dubins_msg(UAV, target, R0)
     path_length = R0 * hudu + np.sqrt(np.sum((np.array(target[0:2]) - tangent_site) ** 2))
     return path_length / UAV.v
-
 
 
 def Tangent_lines(circle_C, point_P):
@@ -460,10 +525,9 @@ def Tangent_lines(circle_C, point_P):
     return [Line(Point(point), Point(tangent_point1)), Line(Point(point), Point(tangent_point2))]
 
 
-def Dubins_msg(UAV, target, R0, type=1):
-    # 最新修改，1. 在R0条件下若短Dubins可达就返回短Dubins信息否则返回长Dubins路径信息。
+def Dubins_msg(UAV, target, R0):
     # 单架无人机到达目标点所需时间
-    # 　这里的UAV和target是无人机和目标对象,type 1 优先最短，短的到不了就长的，type 2 长的 type 0 短的
+    # 　这里的UAV和target是无人机和目标对象
     v = UAV.v  # 飞机速度
     phi0 = UAV.phi  # 转化为弧度，[0,2pi]
 
@@ -481,23 +545,11 @@ def Dubins_msg(UAV, target, R0, type=1):
     c2 = Point(UAV_p.x - R0 * np.sin(phi0), UAV_p.y + R0 * np.cos(phi0))
     len1 = c1.distance(target_p)
     len2 = c2.distance(target_p)
-    minc = c1 if len1 < len2 else c2
-    maxc = c1 if len1 > len2 else c2
+    center = c1
 
-    center = minc
-    if type == 0:
-        if minc.distance(target) <= R0:
-            # 如果小的dubins曲线到达不了，就用大的
-            print('给定半径最短Dubins路径无法到达，R0=%d', R0)
-            print(UAV.site)
-            print(target[0:2])
-            exec()
-    elif type == 1:
-        if minc.distance(target) <= R0:
-            # 如果小的dubins曲线到达不了，就用大的
-            center = maxc
-    elif type == 2:
-        center = maxc
+    if len2 > len1:
+        center = c2
+
     # 2. 求切线
     center = Point(round(center.x.evalf(), 4), round(center.y.evalf(), 4))
     circle = Circle(center, R0)
@@ -576,7 +628,6 @@ def Path_plan(target_index, coalition, cost_time):
     target = Targets_msg[target_index]
     for UAV_index in coalition:
         UAV = UAV_groups[UAV_index]
-
         fixtime_R = FixTime_R(UAV, target, cost_time)
         Dubins_path_plan(UAV, target, fixtime_R)
 
@@ -609,63 +660,24 @@ def Dubins_path_plan(UAV, target, R0):
         UAV.planning_route.append(new_point)
         start_site = new_point
         tagent_now_dis = np.sqrt(np.sum((start_site - tangent_site) ** 2))
-        # io.savemat(r'./path.mat', {'data': np.array(UAV.planning_route)})
-
-
-def distance(point1, point2):
-    # point1,point2 都是array类型
-    return np.sqrt(np.sum((point1 - point2) ** 2))
-
-
-def short_D_max_R(UAV, target):
-    # 短Duins路径，返回最大半径
-    UAV_p = UAV.site
-    target_p = np.array(target[0:2])
-    phi0 = UAV.phi%(2*np.pi)  # 这里需要将其从[0,2pi]映射 [-pi,pi]
-    phi0=phi0 if phi0<=np.pi else phi0-2*np.pi
-    r_target = np.arctan2(target_p[1] - UAV_p[1], target_p[0] - UAV_p[0])  # 目标点的弧度
-    dis_tar_uav = np.sqrt(np.sum((target_p - UAV_p) ** 2))
-    max_R = dis_tar_uav / 2 / np.cos(np.pi / 2 - np.abs(phi0 - r_target))
-    return max_R
+    io.savemat(r'./path.mat', {'data': np.array(UAV.planning_route)})
 
 
 def FixTime_R(UAV, target, cost_time):
     # 固定时间内无人机从当前点到目标点所需转弯半径
     # 调整UAV的转弯半径，使其长度匹配，用二分法处理
     # 　这里的UAV和target是无人机和目标对象
-    # 算法流程，1 判断 短Duins路径，最大半径时间够不够，时间不够的话就用长Dubins二分，够的话就短Dubins二分
-
-    type=0
-    short_d_max_r = short_D_max_R(UAV, target) - 10*deviation  # 短Duins路径，最大半径
-    short_d_max_r_t = Arrival_time(UAV,target,short_d_max_r,type=0)  # 所消耗时间
-    if short_d_max_r_t<cost_time:
-        type=2  # 最大半径时间都不够就用，长Dubins
-
     dis = np.sqrt((target[0] - UAV.site[0]) ** 2 + (target[1] - UAV.site[1]) ** 2)
 
+    t_min = Arrival_time(UAV, target, UAV.r_min)  # 二分法的下界
     R_min = UAV.r_min
-    t_min = Arrival_time(UAV, target, R_min,type=type)  # 二分法的下界
 
-    ## type==2时该有的
-
-    R_max=0
-    t_max=0
-    if type==0:
-        R_max=short_d_max_r
-        t_max=short_d_max_r_t
-    if type==2:
-        R_max = abs(border[0][0] - border[0][1]) / 2
-        t_max = Arrival_time(UAV, target, R_max,type=type)  # 二分法的
-
-
+    R_max = abs(border[0][0] - border[0][1]) / 2
+    t_max = Arrival_time(UAV, target, R_max)  # 二分法的
 
     t = t_min
     R = R_min
 
-    if t_min>cost_time or t_max<cost_time:
-        print('error')
-        print('t_min=%d,t_max=%d,cost_time=%d'%(t_min,t_max,cost_time))
-        exit(0)
     while abs(t - cost_time) > deviation:
         if t < cost_time:
             t_min = t
@@ -674,7 +686,7 @@ def FixTime_R(UAV, target, cost_time):
             t_max = t
             R_max = R
         R = (R_min + R_max) / 2
-        t = Arrival_time(UAV, target, R,type=type)
+        t = Arrival_time(UAV, target, R)
     return R
 
 
@@ -708,7 +720,15 @@ def plot_UAV_target():
             textcoords='offset points',
             ha='center',
             va='top')
+    plt.plot([border[0][0], border[0][1]], [border[1][0], border[1][0]], linestyle='dashed',color='#000000')
+    plt.plot([border[0][0], border[0][0]], [border[1][0], border[1][1]], linestyle='dashed',color='#000000')
+    plt.plot([border[0][0], border[0][1]], [border[1][1], border[1][1]], linestyle='dashed',color='#000000')
+    plt.plot([border[0][1], border[0][1]], [border[1][0], border[1][1]], linestyle='dashed',color='#000000')
+
+    plt.xlabel('x/m',fontsize=13)
+    plt.ylabel('y/m',fontsize=13)
     plt.legend(loc=9)
+    # 画四条边界线
     # 初始化无人机群
 
 
@@ -732,14 +752,73 @@ for msg_i in UAVs_msg:
     UAV_groups.append(self(msg_i))
 
 ggogo = GAPSO()
+GAPSO_list = []
+
+for i in range(GA_thread_num):
+    GAPSO_list.append(GAPSO())
+
+
+def cal_coalition_cost_time(target, target_candidate, arrivals_time):
+    for i in range(GA_thread_num):
+        GAPSO_list[i].set_parameter(target, target_candidate, arrivals_time)
+    GA_iter_temp = 0
+    start = time.time()
+    while GA_iter_temp < GA_iter_num:
+        threads = []
+
+        for i in range(GA_thread_num):
+            # t=Thread(target=GAPSO_list[i].run,args=(i,))
+            t = multiprocessing.Process(target=GAPSO_list[i].run, args=(i,GA_exchang))
+            t.start()
+            threads.append(t)
+
+        for i in range(GA_thread_num):
+            threads[i].join()
+        # 每跑完一定代数进行一次数据迁移
+
+        for i in range(GA_thread_num):
+            # i把最好的给i-1
+            best_gene = GAPSO_list[i].best_pareto_gene()
+
+            # i-1的rank最烂的index   argsort() 不改变list   rank越大越烂
+            worstgene_index_i_1 = np.argsort(GAPSO_list[i - 1].rank)[-1]
+            GAPSO_list[i - 1].population[worstgene_index_i_1] = copy.deepcopy(best_gene)
+            # 重新排序
+            GAPSO_list[i - 1].NSGAII()
+            GAPSO_list[i - 1].Corwed()
+
+        GA_iter_temp += GA_exchang
+    end = time.time()
+    print('GA cost time %s ' % (end - start))
+    # 最后取出,所有子种群里面最好的
+    All_Pareto_list = []
+    for i in range(GA_thread_num):
+        i_Pareto_list = GAPSO_list[i].getPareto_list()
+        All_Pareto_list.extend(i_Pareto_list)
+    best_gene = GAPSO_list[0].pareto_best(All_Pareto_list)
+    coalition, cost_time = GAPSO_list[0].gene_coal_maxtime(best_gene)
+    return coalition, cost_time
+
+def enough_resource(target,coalition):
+    resourse = [UAV_groups[i].resource for i in coalition]
+    resourse = np.sum(resourse, axis=0)
+    if np.alltrue(resourse >= np.array(Targets_msg[target][2])):
+        return True
+    else:
+        return False
+
+def plot_border():
+    plt.plot([border[0, 0], border[0, 1]], [border[1, 0], border[1, 0]],linestyle=':',color='blue')
+    plt.plot([border[0, 1], border[1, 0]], [border[1, 1], border[1, 1]],linestyle=':',color='blue')
+    plt.plot([border[0, 0], border[0, 0]], [border[1, 0], border[1, 1]],linestyle=':',color='blue')
+    plt.plot([border[0, 1], border[0, 1]], [border[1, 0], border[1, 1]],linestyle=':',color='blue')
 if __name__ == '__main__':
     #
     # coa,time=ggogo.cal_GAPSO(1,[1,2,3,5],[50,80,100,170])
     # print('')
 
-    for t in np.arange(0, 138, time_interval):
-        if t == 63.1:
-            print('tets')
+    for t in np.arange(0, 130, time_interval):
+
         group_find_targets = []  # 存放当下无人机发现目标集  ([i,[1 3 6]],[...])
 
         # 执行搜索
@@ -774,12 +853,22 @@ if __name__ == '__main__':
             target_candidate = candidate.copy()  # 此目标的候选集合
             target_candidate.insert(0, captain)  # 把captain插到最前面
 
+            if not enough_resource(target, target_candidate):
+                continue
+
             arrivals_time = Arrivals_time(target, target_candidate)
-            start = time.time()
-            coalition, cost_time = ggogo.cal_GAPSO(target, target_candidate, arrivals_time)
+            # start = time.time()
+
+            coalition, cost_time =cal_coalition_cost_time(target, target_candidate, arrivals_time)
             # coalition, cost_time = liner_add(target, target_candidate, arrivals_time)
             end = time.time()
-            print('GA cost time %s ', end - start)
+
+            if not enough_resource(target, coalition):
+                print("%s->%s not enough resource" % (target_candidate[0], target))
+                continue
+
+            # end = time.time()
+            # print('GA cost time %s ', end - start)
             # 组建联盟，并返回花费时间
             # 获得coalition，后需进行航迹规划，并且把里面的无人机状态改为2，最后在candidate中remove掉这些元素
             # 并且去掉相应的资源
@@ -803,7 +892,13 @@ if __name__ == '__main__':
 
             # 打完了，把目标的状态位设置一下
             Targets_condition[target] = 0
-            print('find target %s', target)
+            print('find target %s' % target)
+
+            if  np.alltrue(Targets_condition==0):
+                finish_time=t+len(UAV_groups[coalition[0]].planning_route)/10.0
+                print('find all target. t=%s finish attack'% (finish_time))
+
+
         # 无人机走一步
         for UAVi in UAV_groups:
             UAVi.move()
@@ -811,5 +906,7 @@ if __name__ == '__main__':
             #     print('test')
     for UAVi in UAV_groups:
         plt.plot(np.array(UAVi.path)[:, 0], np.array(UAVi.path)[:, 1], linewidth=1)
+
     plot_UAV_target()
+
     plt.show()

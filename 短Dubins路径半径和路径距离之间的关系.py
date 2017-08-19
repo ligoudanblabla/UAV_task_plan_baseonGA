@@ -1,3 +1,9 @@
+# -*- coding: utf-8 -*-
+# @Time    : 2017/7/26 10:03
+# @Author  : BaWang
+# @Site    :
+# @Summart : 化短Dubins路径的半径R和路径长度的关系
+
 #
 
 
@@ -109,20 +115,28 @@ def Tangent_lines(circle_C,point_P):
 
 
 deviation = 0.01  # 误差
-UAV_p = np.array([600,-900])
-target_p = np.array([300,0])
+UAV_p = np.array([300,300])
+target_p = np.array([500,700])
 
 UAV = Point(UAV_p)
 target = Point(target_p)
-R0 = 100 # 最小转弯半径
-phi0 = 1.745  # 速度方向 [0,2pi]
-# 以上为所有已知信息
+R0 = 50  # 最小转弯半径
+phi0 = np.pi / 4  # 速度方向 [0,2pi]
 
+r_target=np.arctan2(target_p[1]-UAV_p[1],target_p[0]-UAV_p[0]) # 目标点的弧度
+dis_tar_uav=np.sqrt(np.sum((target_p-UAV_p)**2))
+max_R=dis_tar_uav/2/np.cos(np.pi/2-np.abs(phi0-r_target))
+R0_scope=np.array(np.linspace(R0,max_R-deviation,num=30))
+plengths=[]
+R0=max_R-deviation
+# 以上为所有已知信息
 # 1. 求两个圆心，判断出采用哪一个圆
 # 2. 求切线
 # 3. 确定用那一段弧长
 
 # 1.求两个圆心，判断出采用哪一个圆
+
+# for R0 in R0_scope:
 c1 = Point(UAV.x + R0 * np.sin(phi0), UAV.y - R0 * np.cos(phi0))
 c2 = Point(UAV.x - R0 * np.sin(phi0), UAV.y + R0 * np.cos(phi0))
 len1 = c1.distance(target)
@@ -130,25 +144,12 @@ len2 = c2.distance(target)
 minc=c1 if len1<len2 else c2
 maxc=c1 if len1>len2 else c2
 center=minc
-type=2
-if type == 0:
-    if minc.distance(target) <= R0:
-        # 如果小的dubins曲线到达不了，就用大的
-        print('给定半径最短Dubins路径无法到达，R0=%d', R0)
-        print(UAV.site)
-        print(target[0:2])
-        exec()
-elif type == 1:
-    if minc.distance(target) <= R0:
-        # 如果小的dubins曲线到达不了，就用大的
-        center = maxc
-elif type == 2:
-    center = maxc
 
-# if minc.distance(target)<=R0:
-#     # 如果小的dubins曲线到达不了，就用大的
-#     center=maxc
-# # 2. 求切线
+
+if minc.distance(target)<=R0:
+    # 如果小的dubins曲线到达不了，就用大的
+    center=maxc
+# 2. 求切线
 
 circle = Circle(center, R0)
 #tangent_lines = circle.tangent_lines(target)
@@ -199,7 +200,12 @@ elif abs(modf(abs(direction * (2 * np.pi - angle2) + phi0 - tangent_angle2) / (2
     hudu = 2 * np.pi - angle2
 
 path_length = R0 * hudu + float(tangent_point.distance(target).evalf())
+plengths.append([R0,path_length])
 print(path_length)
+# import matplotlib.pyplot as plt
+# plt.plot(np.array(plengths)[:,0],np.array(plengths)[:,1])
+# plt.show()
+
 
 import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
